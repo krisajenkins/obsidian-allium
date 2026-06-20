@@ -73,6 +73,8 @@
     return out;
   });
 
+  // Focus a node (from the shelf or a satellite). Its detail shows in the
+  // inspector; clicking the focus node again deselects.
   function summon(id: string): void {
     infoKind = null;
     summonedId = summonedId === id ? null : id;
@@ -137,28 +139,28 @@
     graph.edges.filter((e) => positions.has(e.from) && positions.has(e.to)),
   );
 
-  // Zoom-to-fit. Measure the stage and the (variable-height) centre card, then
-  // scale + recentre the whole constellation so it fits the viewport with a
-  // margin. Coordinates are in orbit space: the centre card sits at (0,0),
-  // satellites at their fan positions. clientWidth/Height are unaffected by the
-  // CSS scale, so there's no feedback loop.
+  // Zoom-to-fit. Every node is a uniform compact card now, so the bounding box
+  // is just the focus (0,0) plus the satellite positions, padded by half a card.
+  // Scale + recentre so the whole constellation fits the stage with a margin.
+  // clientWidth/Height ignore the CSS scale, so there's no measurement loop.
   let stageW = $state(0);
   let stageH = $state(0);
-  let cardW = $state(360);
-  let cardH = $state(0);
 
-  const SAT_W = 150;
-  const SAT_H = 52;
-  const FIT_MARGIN = 96;
+  const SAT_W = 158;
+  const SAT_H = 56;
+  const FIT_MARGIN = 120;
 
   let fit = $derived.by(() => {
-    let minX = -cardW / 2,
-      maxX = cardW / 2,
-      minY = -cardH / 2,
-      maxY = cardH / 2;
+    const pts = [{ x: 0, y: 0 }];
     for (const n of connectedNodes) {
       const p = positions.get(n.id);
-      if (!p) continue;
+      if (p) pts.push(p);
+    }
+    let minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+    for (const p of pts) {
       minX = Math.min(minX, p.x - SAT_W / 2);
       maxX = Math.max(maxX, p.x + SAT_W / 2);
       minY = Math.min(minY, p.y - SAT_H / 2);
@@ -171,7 +173,7 @@
       scale = Math.min(1, (stageW - FIT_MARGIN) / bw, (stageH - FIT_MARGIN) / bh);
     }
     return {
-      scale: Math.max(0.3, scale),
+      scale: Math.max(0.4, scale),
       cx: (minX + maxX) / 2,
       cy: (minY + maxY) / 2,
     };
@@ -249,7 +251,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
       <div class="allium-stage" bind:clientWidth={stageW} bind:clientHeight={stageH} onclick={dismiss}>
       {#if summonedNode}
-        {@const face = faceOf(summonedNode.kind)}
         <!-- A zero-size anchor pinned to the stage centre. The zoom layer scales
              the whole constellation to fit; the recentre layer shifts its
              bounding-box centre onto the anchor. -->
@@ -265,47 +266,15 @@
             <EdgeLine {edge} {positions} />
           {/each}
 
-          <!-- Centre card -->
-          <div class="allium-center" style="border-top: 3px solid {face.fg};" bind:clientWidth={cardW} bind:clientHeight={cardH}>
-            <div class="allium-center-head" style="background: {face.bg}; color: {face.fg};">
-              <span class="allium-center-kind">{face.label}</span>
-              <span class="allium-center-loc" title="Line in source">{lineCol(summonedNode.span.start).line}</span>
-            </div>
-            <div class="allium-center-body">
-              <div class="allium-center-name">{formatName(summonedNode.name)}</div>
-              {#if detail}
-                {#if detail.type === "text"}
-                  <div class="allium-prose">{detail.text}</div>
-                {:else if detail.type === "variants"}
-                  <div class="allium-chips">
-                    {#each detail.names as v}<span class="allium-chip">{v}</span>{/each}
-                  </div>
-                {:else if detail.type === "fields" || detail.type === "clauses"}
-                  <dl class="allium-rows" class:clauses={detail.type === "clauses"}>
-                    {#each detail.rows as row}
-                      <dt>{row.label}</dt>
-                      <dd>{row.value}</dd>
-                    {/each}
-                  </dl>
-                {/if}
-              {/if}
-            </div>
-          </div>
-
-          <!-- Fan of connected nodes -->
+          <!-- Satellites -->
           {#each connectedNodes as conn, i (conn.id)}
             {@const pos = fanPosition(i, connectedNodes.length)}
             <NodeCard node={conn} x={pos.x} y={pos.y} {formatName} onclick={() => summon(conn.id)} />
           {/each}
+
+          <!-- Focus node: a compact card at the centre. Click again to deselect. -->
+          <NodeCard node={summonedNode} x={0} y={0} focused {formatName} onclick={() => summon(summonedId)} />
           </div>
-          </div>
-        </div>
-      {:else if infoKind}
-        {@const face = faceOf(infoKind)}
-        <div class="allium-overlay">
-          <div class="allium-info" onclick={(e) => e.stopPropagation()}>
-            <div class="allium-info-badge" style="background: {face.bg}; color: {face.fg};">{face.label}</div>
-            <div class="allium-info-desc">{KIND_DESCRIPTION[infoKind] ?? ""}</div>
           </div>
         </div>
       {:else}
@@ -314,11 +283,56 @@
             <div class="allium-empty-title">
               {graph.nodes.length} declarations · language version {graph.version ?? "?"}
             </div>
-            <div class="allium-empty-hint">click a declaration to summon it</div>
+            <div class="allium-empty-hint">click a declaration to explore it</div>
           </div>
         </div>
       {/if}
       </div>
+    </div>
+
+    <!-- Inspector: always-on detail for the focused node (or kind help). -->
+    <div class="allium-inspector">
+      {#if summonedNode}
+        {@const face = faceOf(summonedNode.kind)}
+        <div class="allium-insp-head" style="background: {face.bg}; color: {face.fg};">
+          <span class="allium-insp-kind">{face.label}</span>
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <span
+            class="allium-insp-loc"
+            title="Jump to the enclosing declaration"
+            onclick={() => revealOffset(summonedNode.span.start)}
+          >{lineCol(summonedNode.span.start).line}</span>
+        </div>
+        <div class="allium-insp-body">
+          <div class="allium-insp-name">{formatName(summonedNode.name)}</div>
+          {#if detail}
+            {#if detail.type === "text"}
+              <div class="allium-prose">{detail.text}</div>
+            {:else if detail.type === "variants"}
+              <div class="allium-chips">
+                {#each detail.names as v}<span class="allium-chip">{v}</span>{/each}
+              </div>
+            {:else if detail.type === "fields" || detail.type === "clauses"}
+              <dl class="allium-rows" class:clauses={detail.type === "clauses"}>
+                {#each detail.rows as row}
+                  <dt>{row.label}</dt>
+                  <dd>{row.value}</dd>
+                {/each}
+              </dl>
+            {/if}
+          {/if}
+        </div>
+      {:else if infoKind}
+        {@const face = faceOf(infoKind)}
+        <div class="allium-insp-head" style="background: {face.bg}; color: {face.fg};">
+          <span class="allium-insp-kind">{face.label}</span>
+        </div>
+        <div class="allium-insp-body">
+          <div class="allium-prose">{KIND_DESCRIPTION[infoKind] ?? ""}</div>
+        </div>
+      {:else}
+        <div class="allium-insp-empty">Select a declaration to inspect it.</div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -467,52 +481,63 @@
     align-items: center;
     justify-content: center;
   }
-  .allium-center {
-    position: absolute;
-    transform: translate(-50%, -50%);
-    width: 360px;
-    max-height: 64vh;
+  .allium-inspector {
+    width: 290px;
+    min-width: 290px;
+    height: 100%;
     display: flex;
     flex-direction: column;
-    border-radius: 12px;
-    background: #fff;
-    box-shadow: 0 10px 34px rgba(40, 30, 20, 0.22);
-    overflow: hidden;
-    z-index: 3;
+    border-left: 1px solid #e0ddd8;
+    background: #fbfaf8;
   }
-  .allium-center-head {
+  .allium-insp-head {
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 7px 14px;
+    gap: 10px;
+    padding: 10px 16px;
   }
-  .allium-center-kind {
-    font-size: 0.62em;
+  .allium-insp-kind {
+    flex: 1;
+    font-size: 0.64em;
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    opacity: 0.7;
+    opacity: 0.75;
   }
-  .allium-center-loc {
-    font-size: 0.62em;
-    opacity: 0.55;
+  .allium-insp-loc {
+    font-size: 0.64em;
+    opacity: 0.7;
+    cursor: pointer;
     font-family: var(--font-monospace, monospace);
   }
-  .allium-center-loc::before {
+  .allium-insp-loc::before {
     content: "line ";
     opacity: 0.7;
   }
-  .allium-center-body {
-    padding: 12px 16px 16px;
+  .allium-insp-loc:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+  .allium-insp-body {
+    padding: 14px 16px 20px;
     overflow-y: auto;
   }
-  .allium-center-name {
+  .allium-insp-name {
     font-size: 1.2em;
     font-weight: 700;
     line-height: 1.25;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     color: #2a2622;
+    overflow-wrap: anywhere;
+  }
+  .allium-insp-empty {
+    margin: auto;
+    padding: 24px;
+    text-align: center;
+    font-size: 0.82em;
+    font-style: italic;
+    color: #aaa49c;
   }
   .allium-rows {
     margin: 0;
@@ -557,28 +582,6 @@
     font-size: 0.84em;
     line-height: 1.5;
     color: #3a342e;
-  }
-  .allium-info {
-    max-width: 360px;
-    padding: 20px 24px;
-    border-radius: 10px;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
-    background: #fff;
-  }
-  .allium-info-badge {
-    display: inline-block;
-    font-size: 0.7em;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 3px 9px;
-    border-radius: 4px;
-    margin-bottom: 10px;
-  }
-  .allium-info-desc {
-    font-size: 0.86em;
-    line-height: 1.5;
-    opacity: 0.8;
   }
   .allium-empty {
     text-align: center;

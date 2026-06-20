@@ -3,7 +3,10 @@ import type { EdgeKind, NodeKind } from "./types";
 /** Card face colours by construct kind. Light faces with dark text, matching
  *  the obsidian-strategy family look (theme-neutral, not Obsidian CSS vars, so
  *  the diagram renders the same under any theme). */
-export const KIND_FACE: Record<string, { bg: string; fg: string; label: string }> = {
+export const KIND_FACE: Record<
+  string,
+  { bg: string; fg: string; label: string }
+> = {
   Entity: { bg: "#d8dfe8", fg: "#1e2e4a", label: "Entity" },
   Value: { bg: "#d0e8e4", fg: "#1a3a34", label: "Value" },
   ExternalEntity: { bg: "#dde2e6", fg: "#33414a", label: "External" },
@@ -22,14 +25,21 @@ export const KIND_FACE: Record<string, { bg: string; fg: string; label: string }
 /** Fallback face for an unfamiliar kind from a future language version. */
 export const UNKNOWN_FACE = { bg: "#e0e0e0", fg: "#333", label: "?" };
 
-export function faceOf(kind: string): { bg: string; fg: string; label: string } {
+export function faceOf(kind: string): {
+  bg: string;
+  fg: string;
+  label: string;
+} {
   return KIND_FACE[kind] ?? { ...UNKNOWN_FACE, label: kind };
 }
 
 /** Shelf sections: ordered groups of kinds. Each becomes a labelled band in
  *  the shelf; kinds within a section keep this order. */
 export const SECTIONS: { label: string; kinds: NodeKind[] }[] = [
-  { label: "Types", kinds: ["Entity", "Value", "ExternalEntity", "Enum", "Variant"] },
+  {
+    label: "Types",
+    kinds: ["Entity", "Value", "ExternalEntity", "Enum", "Variant"],
+  },
   { label: "Behaviour", kinds: ["Rule", "Trigger"] },
   { label: "Boundaries", kinds: ["Surface", "Actor", "Contract"] },
   { label: "Config", kinds: ["Config"] },
@@ -57,21 +67,25 @@ export const EDGE_COLORS: Record<EdgeKind, string> = {
 
 /** One-sentence description for each construct kind (shown in the info card). */
 export const KIND_DESCRIPTION: Record<string, string> = {
-  Entity: "A thing in the domain with identity and fields that change over time.",
-  Value: "An immutable value type — defined wholly by its fields, with no identity.",
-  ExternalEntity: "An entity owned by another system, referenced but not governed here.",
+  Entity:
+    "A thing in the domain with identity and fields that change over time.",
+  Value:
+    "An immutable value type — defined wholly by its fields, with no identity.",
+  ExternalEntity:
+    "An entity owned by another system, referenced but not governed here.",
   Enum: "A closed set of named literal values.",
   Variant: "A named case of a base entity — a sum-type member.",
   Rule: "A behaviour: when some condition holds, it ensures an outcome.",
   Trigger: "A temporal behaviour that fires when a field reaches a state.",
   Surface: "A boundary that exposes data and provides actions to an audience.",
-  Actor: "A role that interacts with the system, identified by a query over entities.",
+  Actor:
+    "A role that interacts with the system, identified by a query over entities.",
   Contract: "A typed interface of demands and fulfilments between surfaces.",
   Config: "Tunable parameters referenced by rules instead of magic numbers.",
   Invariant: "A property that must hold across the whole domain at all times.",
   OpenQuestion: "An unresolved design question recorded in the spec.",
 };
 
-/** Card dimensions used by the fan layout. */
-export const CARD_WIDTH = 150;
-export const CARD_HEIGHT = 64;
+/** Card dimensions used by the orbit layout (kept in sync with the fit math). */
+export const CARD_WIDTH = 158;
+export const CARD_HEIGHT = 56;
