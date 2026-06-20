@@ -136,6 +136,46 @@
   let visibleEdges = $derived(
     graph.edges.filter((e) => positions.has(e.from) && positions.has(e.to)),
   );
+
+  // Zoom-to-fit. Measure the stage and the (variable-height) centre card, then
+  // scale + recentre the whole constellation so it fits the viewport with a
+  // margin. Coordinates are in orbit space: the centre card sits at (0,0),
+  // satellites at their fan positions. clientWidth/Height are unaffected by the
+  // CSS scale, so there's no feedback loop.
+  let stageW = $state(0);
+  let stageH = $state(0);
+  let cardW = $state(360);
+  let cardH = $state(0);
+
+  const SAT_W = 150;
+  const SAT_H = 52;
+  const FIT_MARGIN = 96;
+
+  let fit = $derived.by(() => {
+    let minX = -cardW / 2,
+      maxX = cardW / 2,
+      minY = -cardH / 2,
+      maxY = cardH / 2;
+    for (const n of connectedNodes) {
+      const p = positions.get(n.id);
+      if (!p) continue;
+      minX = Math.min(minX, p.x - SAT_W / 2);
+      maxX = Math.max(maxX, p.x + SAT_W / 2);
+      minY = Math.min(minY, p.y - SAT_H / 2);
+      maxY = Math.max(maxY, p.y + SAT_H / 2);
+    }
+    const bw = maxX - minX;
+    const bh = maxY - minY;
+    let scale = 1;
+    if (stageW > 0 && stageH > 0) {
+      scale = Math.min(1, (stageW - FIT_MARGIN) / bw, (stageH - FIT_MARGIN) / bh);
+    }
+    return {
+      scale: Math.max(0.3, scale),
+      cx: (minX + maxX) / 2,
+      cy: (minY + maxY) / 2,
+    };
+  });
 </script>
 
 <div class="allium-root">
@@ -207,19 +247,26 @@
       {/if}
 
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-      <div class="allium-stage" onclick={dismiss}>
+      <div class="allium-stage" bind:clientWidth={stageW} bind:clientHeight={stageH} onclick={dismiss}>
       {#if summonedNode}
         {@const face = faceOf(summonedNode.kind)}
-        <!-- A zero-size anchor pinned to the stage centre. Everything orbits it,
-             so the centre card stays centred no matter how tall it grows. -->
-        <div class="allium-anchor" onclick={(e) => e.stopPropagation()}>
+        <!-- A zero-size anchor pinned to the stage centre. The zoom layer scales
+             the whole constellation to fit; the recentre layer shifts its
+             bounding-box centre onto the anchor. -->
+        <div class="allium-anchor">
+          <div class="allium-zoom" style="transform: scale({fit.scale});">
+          <div
+            class="allium-recenter"
+            style="transform: translate({-fit.cx}px, {-fit.cy}px);"
+            onclick={(e) => e.stopPropagation()}
+          >
           <!-- Edges behind the cards -->
           {#each visibleEdges as edge (edge.from + edge.to + edge.kind)}
             <EdgeLine {edge} {positions} />
           {/each}
 
           <!-- Centre card -->
-          <div class="allium-center" style="border-top: 3px solid {face.fg};">
+          <div class="allium-center" style="border-top: 3px solid {face.fg};" bind:clientWidth={cardW} bind:clientHeight={cardH}>
             <div class="allium-center-head" style="background: {face.bg}; color: {face.fg};">
               <span class="allium-center-kind">{face.label}</span>
               <span class="allium-center-loc" title="Line in source">{lineCol(summonedNode.span.start).line}</span>
@@ -250,19 +297,25 @@
             {@const pos = fanPosition(i, connectedNodes.length)}
             <NodeCard node={conn} x={pos.x} y={pos.y} {formatName} onclick={() => summon(conn.id)} />
           {/each}
+          </div>
+          </div>
         </div>
       {:else if infoKind}
         {@const face = faceOf(infoKind)}
-        <div class="allium-info" onclick={(e) => e.stopPropagation()}>
-          <div class="allium-info-badge" style="background: {face.bg}; color: {face.fg};">{face.label}</div>
-          <div class="allium-info-desc">{KIND_DESCRIPTION[infoKind] ?? ""}</div>
+        <div class="allium-overlay">
+          <div class="allium-info" onclick={(e) => e.stopPropagation()}>
+            <div class="allium-info-badge" style="background: {face.bg}; color: {face.fg};">{face.label}</div>
+            <div class="allium-info-desc">{KIND_DESCRIPTION[infoKind] ?? ""}</div>
+          </div>
         </div>
       {:else}
-        <div class="allium-empty">
-          <div class="allium-empty-title">
-            {graph.nodes.length} declarations · language version {graph.version ?? "?"}
+        <div class="allium-overlay">
+          <div class="allium-empty">
+            <div class="allium-empty-title">
+              {graph.nodes.length} declarations · language version {graph.version ?? "?"}
+            </div>
+            <div class="allium-empty-hint">click a declaration to summon it</div>
           </div>
-          <div class="allium-empty-hint">click a declaration to summon it</div>
         </div>
       {/if}
       </div>
@@ -398,6 +451,21 @@
     top: 50%;
     width: 0;
     height: 0;
+  }
+  .allium-zoom {
+    position: absolute;
+    transform-origin: 0 0;
+    transition: transform 0.18s ease;
+  }
+  .allium-recenter {
+    position: absolute;
+  }
+  .allium-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .allium-center {
     position: absolute;
