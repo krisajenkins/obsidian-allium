@@ -1,0 +1,411 @@
+-- allium: 2
+-- dictat.allium
+
+-- Scope: Speech-to-text dictation for presentation preparation
+-- Includes: Recording interaction, segment lifecycle, session management,
+--   text editing, markdown export
+-- Excludes:
+--   - STT integration details (external service, ElevenLabs)
+--   - Downstream LLM agent / slide deck generation
+--   - Authentication (single-user browser app)
+--   - Persistence mechanism (browser storage is implementation)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity Transcription {
+    text: String
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SegmentType { speech | direction | editor }
+
+enum SegmentStatus { recording | committed }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Session {
+    id: String
+    name: String
+    created_at: Timestamp
+
+    -- Relationships
+    segments: Segment with session = this
+
+    -- Projections
+    committed_segments: segments where status = committed
+    non_empty_segments: committed_segments where text != ""
+
+    -- Derived
+    is_empty: segments.count = 0
+    next_position: segments.count + 1
+    latest_segment_at: segments.last.created_at
+}
+
+entity Segment {
+    session: Session
+    position: Integer
+    segment_type: SegmentType
+    status: SegmentStatus
+    text: String
+    created_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    speech_key: String = "Space"
+    direction_key: String = "d"
+    editor_key: String = "e"
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Session creation (implicit on first keypress)
+
+rule FirstKeypressCreatesSession {
+    when: KeyPressedWithoutSession(key)
+    requires: key in { config.speech_key, config.direction_key, config.editor_key }
+
+    let segment_type =
+        if key = config.speech_key: speech
+        else if key = config.direction_key: direction
+        else: editor
+
+    ensures:
+        let session = Session.created(
+            id: generate_uuid(),
+            name: format_datetime(now),
+            created_at: now
+        )
+        let segment = Segment.created(
+            session: session,
+            position: 1,
+            segment_type: segment_type,
+            status: recording,
+            text: "",
+            created_at: now
+        )
+        ActiveRecording.created(
+            session: session,
+            key: key,
+            key_stack: {},
+            current_segment: segment
+        )
+}
+
+-- Recording interaction
+
+rule PresenterBeginsRecording {
+    when: KeyPressed(session, key)
+    requires: key in { config.speech_key, config.direction_key, config.editor_key }
+    requires: not exists ActiveRecording{session}
+
+    let segment_type =
+        if key = config.speech_key: speech
+        else if key = config.direction_key: direction
+        else: editor
+
+    ensures:
+        let segment = Segment.created(
+            session: session,
+            position: session.next_position,
+            segment_type: segment_type,
+            status: recording,
+            text: "",
+            created_at: now
+        )
+        ActiveRecording.created(
+            session: session,
+            key: key,
+            key_stack: {},
+            current_segment: segment
+        )
+}
+
+rule PresenterSwitchesMode {
+    when: KeyPressed(session, key)
+    requires: key in { config.speech_key, config.direction_key, config.editor_key }
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+
+    let segment_type =
+        if key = config.speech_key: speech
+        else if key = config.direction_key: direction
+        else: editor
+
+    -- Commit current segment
+    ensures: recording.current_segment.status = committed
+
+    -- Start new segment for the new mode
+    ensures:
+        let segment = Segment.created(
+            session: session,
+            position: session.next_position,
+            segment_type: segment_type,
+            status: recording,
+            text: "",
+            created_at: now
+        )
+        recording.current_segment = segment
+
+    -- Push the new key onto the stack
+    ensures: recording.key_stack.add(key)
+}
+
+rule PresenterReleasesKey {
+    when: KeyReleased(session, key)
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+
+    -- Commit current segment and remove key from stack
+    ensures: recording.current_segment.status = committed
+    ensures: recording.key_stack.remove(key)
+
+    -- Chain to determine what happens next
+    ensures: KeyStackUpdated(session: session)
+}
+
+rule RecordingRevertsToPreviousMode {
+    when: KeyStackUpdated(session)
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+    requires: recording.key_stack.count > 0
+
+    -- There's still a key held underneath, start a new segment for it
+    let previous_key = recording.key_stack.last
+
+    let segment_type =
+        if previous_key = config.speech_key: speech
+        else if previous_key = config.direction_key: direction
+        else: editor
+
+    ensures:
+        let segment = Segment.created(
+            session: session,
+            position: session.next_position,
+            segment_type: segment_type,
+            status: recording,
+            text: "",
+            created_at: now
+        )
+        recording.current_segment = segment
+}
+
+rule RecordingEnds {
+    when: KeyStackUpdated(session)
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+    requires: recording.key_stack.count = 0
+
+    ensures: not exists recording
+}
+
+-- Transcription
+
+rule PartialTranscriptArrives {
+    when: PartialTranscriptReceived(session, text)
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+
+    ensures: recording.current_segment.text = text
+}
+
+rule CommittedTranscriptArrives {
+    when: CommittedTranscriptReceived(session, text)
+    requires: exists ActiveRecording{session}
+
+    let recording = ActiveRecording{session}
+    let current_text = recording.current_segment.text
+
+    -- Append to existing text (handles mid-segment auto-commits
+    -- from the STT service without splitting the segment)
+    ensures: recording.current_segment.text =
+        if current_text = "": text
+        else: current_text + " " + text
+}
+
+-- Empty segment cleanup
+
+rule DiscardEmptySegment {
+    when: segment: Segment.status transitions_to committed
+    requires: segment.text = ""
+    ensures: not exists segment
+}
+
+-- Segment editing
+
+rule PresenterEditsSegment {
+    when: EditSegmentText(segment, new_text)
+    requires: segment.status = committed
+    ensures: segment.text = new_text
+}
+
+rule PresenterDeletesSegment {
+    when: DeleteSegment(segment)
+    requires: segment.status = committed
+    ensures: not exists segment
+}
+
+-- Session management
+
+rule PresenterDeletesSession {
+    when: DeleteSession(session)
+    requires: not exists ActiveRecording{session}
+    ensures:
+        for segment in session.segments:
+            not exists segment
+        not exists session
+}
+
+rule PresenterRenamesSession {
+    when: RenameSession(session, new_name)
+    ensures: session.name = new_name
+}
+
+rule PresenterExportsSession {
+    when: ExportSession(session)
+    ensures: MarkdownExport.created(
+        session: session,
+        content: render_markdown(session.non_empty_segments)
+    )
+
+    @guidance
+        -- Speech segments render as plain paragraphs.
+        -- Direction segments render as Obsidian callouts: > [!direction]
+        -- Editor segments render as Obsidian callouts: > [!editor]
+        -- Segments are rendered in position order.
+}
+
+------------------------------------------------------------
+-- Supporting Entities
+------------------------------------------------------------
+
+entity ActiveRecording {
+    session: Session
+    key: String
+    key_stack: List<String>
+    current_segment: Segment
+}
+
+entity MarkdownExport {
+    session: Session
+    content: String
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant SegmentPositionsUnique {
+    for a in Segments:
+        for b in Segments:
+            a != b and a.session = b.session
+                implies a.position != b.position
+}
+
+invariant AtMostOneActiveRecording {
+    for a in ActiveRecordings:
+        for b in ActiveRecordings:
+            a != b implies a.session != b.session
+}
+
+invariant AtMostOneRecordingSegment {
+    for a in Segments:
+        for b in Segments:
+            a != b and a.session = b.session
+            and a.status = recording and b.status = recording
+                implies false
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor Presenter {
+    identified_by: Session
+
+    @guidance
+        -- Single-user app. The presenter is whoever is using the browser.
+        -- No authentication required.
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface SessionList {
+    facing user: Presenter
+
+    exposes:
+        for session in Sessions:
+            session.name
+            session.created_at
+            session.latest_segment_at
+
+    provides:
+        DeleteSession(session)
+        ExportSession(session)
+
+    @guarantee SortedByLatestActivity
+        -- Sessions are sorted by the timestamp of their most
+        -- recent segment, newest first.
+}
+
+surface SessionView {
+    facing user: Presenter
+
+    context session: Session
+
+    let recording = ActiveRecording{session}
+
+    exposes:
+        session.name
+        for segment in session.segments:
+            segment.segment_type
+            segment.status
+            segment.text
+            segment.position
+            segment.created_at
+
+    provides:
+        RenameSession(session, new_name)
+        KeyPressedWithoutSession(key)
+        KeyPressed(session, key)
+        KeyReleased(session, key)
+        EditSegmentText(segment, new_text) when segment.status = committed
+        DeleteSegment(segment) when segment.status = committed
+        ExportSession(session)
+
+    @guarantee LiveTranscription
+        -- While recording, the current segment's text updates
+        -- in real-time as the STT service sends partial results.
+        -- The partial text is replaced by the final committed
+        -- text when the segment is committed. The view auto-scrolls
+        -- to the bottom as text updates.
+
+    @guarantee AutoScrollOnEntry
+        -- When switching to a session, the view scrolls to the
+        -- bottom of the transcript.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- None currently outstanding.

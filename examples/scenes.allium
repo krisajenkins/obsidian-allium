@@ -1,0 +1,783 @@
+-- allium: 2
+-- Scenes: a tool for spatially organising ideas from markdown documents.
+-- Markdown sections become cards on a spatial canvas. Cards can be arranged
+-- into multiple named layouts (tableaux) with animated transitions between them.
+-- The markdown file is the source of truth for content; sidecar JSON files
+-- store spatial arrangements.
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- Obsidian vault filesystem — managed by Obsidian, not by this spec.
+external entity MarkdownFile {
+    path: String
+    content: String
+}
+
+external entity SidecarFile {
+    path: String
+    content: String
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value Position {
+    x: Integer
+    y: Integer
+}
+
+value Viewport {
+    offset_x: Integer
+    offset_y: Integer
+    scale: Decimal
+}
+
+value BoundingBox {
+    min_x: Integer
+    min_y: Integer
+    max_x: Integer
+    max_y: Integer
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Card {
+    -- A section of a markdown document, parsed from --- separators.
+    heading: String                              -- first markdown heading (or first non-empty line)
+    level: Integer                               -- heading depth (2 for ##, 3 for ###, etc.)
+    content: String                              -- markdown body excluding the heading line
+    line: Integer                                -- source line number in the document
+
+    invariant HeadingIsIdentity {
+        -- Cards are identified by their heading text within a document.
+        -- Two cards in the same document cannot share a heading.
+        heading != ""
+    }
+}
+
+entity Tableau {
+    -- A named spatial arrangement of cards.
+    name: String
+    card_positions: Set<CardPlacement>
+    viewport: Viewport?
+
+    -- Relationships
+    placements: CardPlacement with tableau = this
+
+    -- Projections
+    placed_headings: placements -> heading
+
+    -- Derived
+    has_card(heading): placements.any(p => p.heading = heading)
+}
+
+entity CardPlacement {
+    -- A card's position within a specific tableau.
+    tableau: Tableau
+    heading: String                              -- references Card.heading
+    position: Position
+}
+
+entity Document {
+    -- The active Scenes session for a markdown file.
+    file: MarkdownFile
+    cards: List<Card>
+    tableaux: List<Tableau>
+    active_tableau: Tableau
+    selected_cards: Set<String>                  -- set of headings
+
+    -- Derived
+    active_positions: active_tableau.card_positions
+    unplaced_cards: cards where heading not in active_tableau.placed_headings
+    placed_cards: cards where heading in active_tableau.placed_headings
+    has_selection: selected_cards.count > 0
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    card_width: Integer = 320
+    card_height: Integer = 150
+    grid_size: Integer = 20
+    gutter: Integer = 20
+    min_scale: Decimal = 0.2
+    max_scale: Decimal = 3.0
+    grid_columns: Integer = 3
+    row_height: Integer = 260
+    origin_x: Integer = 40
+    origin_y: Integer = 40
+    drag_threshold: Integer = 3
+    save_debounce_ms: Integer = 500
+    cluster_threshold: Integer = 60
+    default_tableau_name: String = "Default"
+    sidecar_extension: String = ".scenes.json"
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ## Document Parsing
+
+rule ParseDocument {
+    when: FileOpened(file)
+    let content = file.content
+    let cards = parse_cards(content)            -- black box: splits on --- separators,
+                                                -- skips frontmatter, respects code fences
+    requires: cards.count > 0                   -- files without --- separators produce no cards
+    ensures:
+        let tableaux_data = load_sidecar(file)  -- black box: reads .scenes.json or returns default
+        Document.created(
+            file: file,
+            cards: cards,
+            tableaux: tableaux_data.tableaux,
+            active_tableau: tableaux_data.active_tableau,
+            selected_cards: {}
+        )
+}
+
+rule ReloadOnExternalEdit {
+    when: doc: Document.file.content transitions_to _
+    let old_cards = doc.cards
+    let new_cards = parse_cards(doc.file.content)
+    let old_headings = old_cards -> heading
+    let new_headings = new_cards -> heading
+    let removed = old_headings - new_headings
+    let added = new_headings - old_headings
+    ensures:
+        doc.cards = new_cards
+        -- Smart rename detection: if exactly one heading disappeared
+        -- and exactly one appeared, treat as rename and transfer positions.
+        if removed.count = 1 and added.count = 1:
+            HeadingRenamed(doc, old_heading: removed.first, new_heading: added.first)
+        else:
+            -- Prune stale positions from all tableaux
+            for tableau in doc.tableaux:
+                for heading in removed:
+                    if exists CardPlacement{tableau, heading}:
+                        not exists CardPlacement{tableau, heading}
+}
+
+rule HeadingRenameTransfer {
+    when: HeadingRenamed(doc, old_heading, new_heading)
+    for tableau in doc.tableaux:
+        let placement = CardPlacement{tableau, heading: old_heading}
+        ensures:
+            if exists placement:
+                not exists placement
+                CardPlacement.created(
+                    tableau: tableau,
+                    heading: new_heading,
+                    position: placement.position
+                )
+}
+
+-- ## Tableau Lifecycle
+
+rule CreateTableau {
+    when: UserCreatesTableau(doc, name)
+    requires: not doc.tableaux.any(t => t.name = name)
+    ensures:
+        let tableau = Tableau.created(name: name, card_positions: {}, viewport: null)
+        doc.tableaux.add(tableau)
+        doc.active_tableau = tableau
+        doc.selected_cards = {}
+        DocumentChanged(doc)
+}
+
+rule SelectTableau {
+    when: UserSelectsTableau(doc, tableau)
+    requires: tableau in doc.tableaux
+    requires: tableau != doc.active_tableau
+    ensures:
+        doc.active_tableau = tableau
+        doc.selected_cards = {}
+        -- Cards animate via springs to their new positions.
+        -- Viewport restored if saved, otherwise fit-all.
+        ViewportRestored(doc, tableau)
+}
+
+rule CycleTableau {
+    when: UserCyclesTableau(doc, direction)
+    let next = cycle_tableau(doc.tableaux, doc.active_tableau, direction)
+        -- black box: finds current index, adds direction, wraps with modular arithmetic
+    ensures:
+        doc.active_tableau = next
+        doc.selected_cards = {}
+        ViewportRestored(doc, doc.active_tableau)
+}
+
+rule SelectTableauByNumber {
+    when: UserPressesNumber(doc, n)
+    requires: n >= 1 and n <= doc.tableaux.count
+    let target = nth(doc.tableaux, n - 1)     -- black box: zero-indexed list access
+    ensures:
+        doc.active_tableau = target
+        doc.selected_cards = {}
+        ViewportRestored(doc, doc.active_tableau)
+}
+
+rule DuplicateTableau {
+    when: UserDuplicatesTableau(doc, source)
+    requires: source in doc.tableaux
+    let new_name = source.name + " (copy)"
+    ensures:
+        let new_tableau = Tableau.created(
+            name: new_name,
+            card_positions: source.card_positions,
+            viewport: source.viewport
+        )
+        doc.tableaux.add(new_tableau)
+        doc.active_tableau = new_tableau
+        DocumentChanged(doc)
+}
+
+rule RenameTableau {
+    when: UserRenamesTableau(doc, tableau, new_name)
+    requires: tableau in doc.tableaux
+    requires: not doc.tableaux.any(t => t.name = new_name and t != tableau)
+    ensures:
+        tableau.name = new_name
+        DocumentChanged(doc)
+}
+
+rule DeleteTableau {
+    when: UserDeletesTableau(doc, tableau)
+    requires: doc.tableaux.count > 1              -- cannot delete the last tableau
+    requires: tableau in doc.tableaux
+    ensures:
+        if doc.active_tableau = tableau:
+            -- Switch to nearest remaining tableau
+            doc.active_tableau = nearest_tableau(doc.tableaux, tableau)  -- black box
+        not exists tableau
+        DocumentChanged(doc)
+}
+
+rule ReorderTableauTabs {
+    when: UserReordersTableau(doc, tableau, new_index)
+    requires: tableau in doc.tableaux
+    ensures:
+        doc.tableaux = reorder(doc.tableaux, tableau, new_index)  -- black box: moves element
+        DocumentChanged(doc)
+}
+
+-- ## Card Placement
+
+rule PlaceCardFromInbox {
+    when: UserPlacesCard(doc, heading, position)
+    requires: heading in doc.unplaced_cards -> heading
+    let snapped = snap_to_grid(position)          -- black box: round to 20px grid
+    ensures:
+        CardPlacement.created(
+            tableau: doc.active_tableau,
+            heading: heading,
+            position: snapped
+        )
+        DocumentChanged(doc)
+}
+
+rule PlaceAllCards {
+    when: UserPlacesAllCards(doc)
+    requires: doc.unplaced_cards.count > 0
+    let existing_count = doc.active_tableau.placements.count
+    for card in doc.unplaced_cards:
+        let grid_position = grid_layout(card, existing_count)  -- black box: column/row formula using card's index in unplaced list
+        ensures:
+            CardPlacement.created(
+                tableau: doc.active_tableau,
+                heading: card.heading,
+                position: grid_position
+            )
+    ensures: DocumentChanged(doc)
+}
+
+rule RemoveCardFromTableau {
+    when: UserRemovesCard(doc, heading)
+    let placement = CardPlacement{tableau: doc.active_tableau, heading}
+    requires: exists placement
+    ensures:
+        not exists placement
+        DocumentChanged(doc)
+}
+
+rule RemoveAllCards {
+    when: UserRemovesAllCards(doc)
+    for placement in doc.active_tableau.placements:
+        ensures: not exists placement
+    ensures: DocumentChanged(doc)
+}
+
+-- ## Card Dragging
+
+rule DragCard {
+    when: UserDragsCard(doc, heading, delta)
+    let placement = CardPlacement{tableau: doc.active_tableau, heading}
+    requires: exists placement
+    -- During drag, position updates bypass springs for instant tracking.
+    -- Delta is in canvas coordinates (screen delta / scale).
+    ensures:
+        if doc.selected_cards.count > 1 and heading in doc.selected_cards:
+            -- Group drag: move all selected cards by same offset
+            for selected_heading in doc.selected_cards:
+                let selected_placement = CardPlacement{tableau: doc.active_tableau, heading: selected_heading}
+                if exists selected_placement:
+                    selected_placement.position = Position{
+                        x: selected_placement.position.x + delta.x,
+                        y: selected_placement.position.y + delta.y
+                    }
+        else:
+            placement.position = Position{
+                x: placement.position.x + delta.x,
+                y: placement.position.y + delta.y
+            }
+}
+
+rule DropCard {
+    when: UserDropsCard(doc, heading, position)
+    let snapped = snap_to_grid(position)
+    let placement = CardPlacement{tableau: doc.active_tableau, heading}
+    requires: exists placement
+    ensures:
+        placement.position = snapped
+        -- If group drag, snap all selected cards
+        if doc.selected_cards.count > 1 and heading in doc.selected_cards:
+            for selected_heading in doc.selected_cards:
+                let sp = CardPlacement{tableau: doc.active_tableau, heading: selected_heading}
+                if exists sp and selected_heading != heading:
+                    sp.position = snap_to_grid(sp.position)
+        DocumentChanged(doc)
+
+    @guidance
+        -- On drop, spring targets update and cards animate to snapped positions.
+        -- The 3px drag threshold in CardView distinguishes clicks from drags.
+}
+
+-- ## Selection
+
+rule SelectCard {
+    when: UserClicksCard(doc, heading)
+    ensures:
+        doc.selected_cards = { heading }
+}
+
+rule ShiftClickCard {
+    when: UserShiftClicksCard(doc, heading)
+    ensures:
+        doc.selected_cards = doc.selected_cards + { heading }
+}
+
+rule SelectCluster {
+    when: UserCmdClicksCard(doc, heading)
+    -- BFS flood-fill: find all cards within cluster_threshold (60px)
+    -- edge-to-edge distance of the clicked card.
+    let cluster = find_cluster(doc, heading)     -- black box: BFS by proximity
+    ensures:
+        doc.selected_cards = cluster
+}
+
+rule MarqueeSelect {
+    when: UserMarqueeSelects(doc, rect, is_additive)
+    let hit_cards = cards_in_rect(doc, rect)     -- black box: AABB intersection test
+    ensures:
+        if is_additive:
+            doc.selected_cards = doc.selected_cards + hit_cards
+        else:
+            doc.selected_cards = hit_cards
+}
+
+rule SelectAll {
+    when: UserSelectsAll(doc)
+    ensures:
+        doc.selected_cards = doc.placed_cards -> heading
+}
+
+rule ClearSelection {
+    when: UserClicksCanvas(doc)
+    ensures:
+        doc.selected_cards = {}
+}
+
+-- ## Alignment
+
+rule AlignVertically {
+    when: UserAlignsVertically(doc)
+    requires: doc.selected_cards.count >= 2
+    let columns = group_into_columns(doc, doc.selected_cards)  -- black box: x-proximity grouping
+    for column in columns:
+        let min_x = column.min(p => p.position.x)
+        for placement in column:
+            ensures: placement.position = Position{ x: min_x, y: placement.position.y }
+    ensures: DocumentChanged(doc)
+}
+
+rule AlignHorizontally {
+    when: UserAlignsHorizontally(doc)
+    requires: doc.selected_cards.count >= 2
+    let columns = group_into_columns(doc, doc.selected_cards)
+    for column in columns:
+        let min_y = column.min(p => p.position.y)
+        for placement in column:
+            ensures: placement.position = Position{ x: placement.position.x, y: min_y }
+    ensures: DocumentChanged(doc)
+}
+
+rule DistributeColumnsHorizontally {
+    when: UserDistributesHorizontally(doc)
+    requires: doc.selected_cards.count >= 2
+    -- Groups selected cards into columns, left-aligns each column,
+    -- then spaces columns so there are 3 gutters between the right
+    -- edge of one column and the left edge of the next.
+    let columns = group_into_columns(doc, doc.selected_cards)
+    let gap = config.gutter * 3
+    let cursor_x = columns.first.min(p => p.position.x)
+    for column in columns:
+        for placement in column:
+            ensures: placement.position = Position{ x: cursor_x, y: placement.position.y }
+        cursor_x = cursor_x + config.card_width + gap
+    ensures: DocumentChanged(doc)
+}
+
+rule DistributeCardsVertically {
+    when: UserDistributesVertically(doc)
+    requires: doc.selected_cards.count >= 2
+    -- Within each column, distributes cards vertically with 1 gutter gap.
+    -- Uses measured card heights rounded up to the next grid multiple.
+    let columns = group_into_columns(doc, doc.selected_cards)
+    for column in columns:
+        let cursor_y = column.first.position.y
+        for placement in column:
+            ensures: placement.position = Position{ x: placement.position.x, y: cursor_y }
+            let card_height = measured_height(placement.heading)  -- black box: DOM-measured height
+            let snapped_height = ceil_to_grid(card_height)        -- black box: ceil to grid_size multiple
+            cursor_y = cursor_y + snapped_height + config.gutter
+    ensures: DocumentChanged(doc)
+}
+
+-- ## Viewport
+
+rule ZoomToFit {
+    when: UserZoomsToFit(doc)
+    let target_cards = if doc.has_selection: doc.selected_cards else: doc.placed_cards -> heading
+    requires: target_cards.count > 0
+    let bbox = bounding_box(doc, target_cards)   -- black box: min/max x,y + padding
+    ensures:
+        doc.active_tableau.viewport = fit_viewport(bbox)  -- black box: scale to fit within bounds
+        DocumentChanged(doc)
+}
+
+-- ## Inspect
+
+rule InspectCard {
+    when: UserDoubleclicksCard(doc, heading)
+    let card = doc.cards where heading = heading
+    requires: card.count > 0
+    ensures:
+        -- Opens the source markdown file in an adjacent editor pane,
+        -- scrolled to the card's heading line. Reuses an existing tab
+        -- if one is already open for this file.
+        OpenEditorAtLine(doc.file, card.first.line)
+
+    @guidance
+        -- Implementation searches for an existing markdown leaf with
+        -- this file. If found, reuses it to prevent duplicate tabs.
+        -- Sets eState.line to scroll the editor to the heading.
+}
+
+-- ## Document Reordering
+
+rule ReorderDocument {
+    when: UserReordersDocument(doc)
+    requires: doc.placed_cards.count > 0
+    let columns = group_into_columns(doc, doc.placed_cards -> heading)
+    -- Columns are left-to-right, cards within each column top-to-bottom.
+    -- Placed cards ordered; unplaced cards appended at end.
+    let new_content = reorder_sections(doc.file.content, columns, doc.unplaced_cards)
+        -- black box: rewrites markdown section order, uses ---- between columns
+        -- and --- within columns (Advanced Slides format).
+        -- Placed sections have any hidden-slide markers removed.
+        -- Unplaced sections receive a hidden-slide marker
+        -- (<!-- .slide: data-visibility="hidden" -->) inserted after
+        -- the heading line, so they are suppressed during presentation.
+    ensures:
+        doc.file.content = new_content
+        DocumentChanged(doc)
+
+    @guidance
+        -- Shows a notice: "Reordered N sections to match layout".
+}
+
+-- ## Persistence
+
+rule SaveSidecar {
+    when: DocumentChanged(doc)
+    ensures:
+        -- Debounced 500ms save to .scenes.json sidecar file.
+        -- Format: pretty-printed JSON (2-space indent).
+        PersistSidecar(doc)
+
+    @guidance
+        -- Uses vault.adapter.write, not vault.create/modify.
+        -- Sidecar filename: document.md → document.scenes.json.
+}
+
+rule RenameSidecar {
+    when: FileRenamed(old_path, new_path)
+    ensures:
+        SidecarRenamed(old_path, new_path)
+
+    @guidance
+        -- Copies sidecar content to new path, deletes old sidecar.
+}
+
+rule DeleteSidecar {
+    when: FileDeleted(path)
+    ensures:
+        SidecarDeleted(path)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant UniqueTableauNames {
+    for doc in Documents:
+        for a in doc.tableaux:
+            for b in doc.tableaux:
+                a != b implies a.name != b.name
+}
+
+invariant AtLeastOneTableau {
+    for doc in Documents:
+        doc.tableaux.count >= 1
+}
+
+invariant ActiveTableauExists {
+    for doc in Documents:
+        doc.active_tableau in doc.tableaux
+}
+
+invariant UniqueCardHeadings {
+    for doc in Documents:
+        for a in doc.cards:
+            for b in doc.cards:
+                a != b implies a.heading != b.heading
+}
+
+invariant PlacementsReferenceValidCards {
+    -- No card placement references a heading that doesn't exist in the document.
+    for doc in Documents:
+        for tableau in doc.tableaux:
+            for placement in tableau.placements:
+                doc.cards.any(c => c.heading = placement.heading)
+}
+
+invariant PositionsSnapToGrid {
+    for placement in CardPlacements:
+        divisible_by(placement.position.x, config.grid_size)      -- black box: x mod grid_size = 0
+        and divisible_by(placement.position.y, config.grid_size)   -- black box: y mod grid_size = 0
+}
+
+invariant ViewportScaleInRange {
+    for tableau in Tableaux:
+        tableau.viewport != null implies
+            tableau.viewport.scale >= config.min_scale
+            and tableau.viewport.scale <= config.max_scale
+}
+
+invariant SelectionSubsetOfPlaced {
+    -- Selected cards must be placed in the active tableau.
+    for doc in Documents:
+        for heading in doc.selected_cards:
+            doc.active_tableau.has_card(heading)
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor User {
+    identified_by: MarkdownFile where true       -- any user with an open file
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface ScenesCanvas {
+    -- The main spatial canvas where cards are arranged.
+    facing viewer: User
+    context doc: Document
+
+    exposes:
+        doc.active_tableau.name
+        for card in doc.placed_cards:
+            card.heading
+            card.level
+            card.content
+            CardPlacement{tableau: doc.active_tableau, heading: card.heading}.position
+            card.heading in doc.selected_cards
+        for card in doc.unplaced_cards:
+            card.heading
+            card.content
+        doc.active_tableau.viewport
+
+    provides:
+        -- Card placement
+        UserPlacesCard(doc, heading, position)
+            when heading in doc.unplaced_cards -> heading
+        UserPlacesAllCards(doc)
+            when doc.unplaced_cards.count > 0
+        UserRemovesCard(doc, heading)
+            when doc.active_tableau.has_card(heading)
+        UserRemovesAllCards(doc)
+            when doc.active_tableau.placements.count > 0
+
+        -- Card interaction
+        UserDragsCard(doc, heading, delta)
+            when doc.active_tableau.has_card(heading)
+        UserDropsCard(doc, heading, position)
+            when doc.active_tableau.has_card(heading)
+        UserClicksCard(doc, heading)
+        UserShiftClicksCard(doc, heading)
+        UserCmdClicksCard(doc, heading)
+        UserDoubleclicksCard(doc, heading)
+        UserMarqueeSelects(doc, rect, is_additive)
+        UserClicksCanvas(doc)
+        UserSelectsAll(doc)
+
+        -- Alignment & distribution
+        UserAlignsVertically(doc)
+            when doc.selected_cards.count >= 2
+        UserAlignsHorizontally(doc)
+            when doc.selected_cards.count >= 2
+        UserDistributesHorizontally(doc)
+            when doc.selected_cards.count >= 2
+        UserDistributesVertically(doc)
+            when doc.selected_cards.count >= 2
+
+    related:
+        TableauToolbar(doc)
+        KeyboardHelp(doc)
+
+    @guarantee SpringAnimatedTransitions
+        -- When switching tableaux, every card animates from its current
+        -- position to its target position via spring physics (~300-500ms).
+        -- This animation is informational: it reveals which ideas cluster
+        -- together across perspectives.
+
+    @guarantee InteractiveElementProtection
+        -- Pointer events on links, buttons, inputs, textareas, selects,
+        -- and details/summary elements inside cards do not trigger drag.
+
+    @guarantee DragThreshold
+        -- A 3px movement threshold distinguishes click from drag.
+        -- Pointer movement under 3px is treated as a click.
+}
+
+surface TableauToolbar {
+    -- Toolbar: tableau tabs on the left, action buttons on the right.
+    facing viewer: User
+    context doc: Document
+
+    exposes:
+        for tableau in doc.tableaux:
+            tableau.name
+            tableau = doc.active_tableau
+
+    provides:
+        -- Tableau management (left side: tabs)
+        UserSelectsTableau(doc, tableau)
+        UserCreatesTableau(doc, name)
+        UserRenamesTableau(doc, tableau, new_name)
+        UserDuplicatesTableau(doc, source)
+        UserDeletesTableau(doc, tableau)
+            when doc.tableaux.count > 1
+        UserReordersTableau(doc, tableau, new_index)
+        UserCyclesTableau(doc, direction)
+        UserPressesNumber(doc, n)
+            when n >= 1 and n <= doc.tableaux.count
+
+        -- Actions (right side: buttons)
+        UserZoomsToFit(doc)
+        UserReordersDocument(doc)
+            when doc.placed_cards.count > 0
+
+    @guidance
+        -- Double-click tab to rename. Right-click for duplicate/delete context menu.
+        -- Tabs are drag-reorderable via HTML5 drag-and-drop.
+        -- Right side has fit-all (⊡), reorder (↕), and delete (🗑) buttons.
+}
+
+surface KeyboardHelp {
+    -- Centered overlay toggled by Shift+?.
+    facing viewer: User
+    context doc: Document
+
+    exposes:
+        -- All available keyboard shortcuts:
+        -- Scroll: pan canvas
+        -- Ctrl/Cmd+scroll: zoom
+        -- 1-9: switch to nth tableau
+        -- Shift+?: toggle this help
+        -- Cmd+A: select all
+        -- V: align vertically
+        -- H: align horizontally
+        -- Shift+V: distribute vertically
+        -- Shift+H: distribute horizontally
+        -- Z: zoom to fit
+        -- Cmd+click: select cluster
+        -- Shift+click: add to selection
+        doc.has_selection
+
+    @guidance
+        -- Overlay appears centered on screen, not in a corner.
+        -- Toggled by Shift+?, dismissed by pressing ? again or Escape.
+}
+
+surface CommandPalette {
+    -- Obsidian command palette integration.
+    facing viewer: User
+
+    provides:
+        FileOpened(file)
+        UserCyclesTableau(doc, direction)
+
+    @guidance
+        -- Three commands registered:
+        -- "Open Scenes view for current file"
+        -- "Next tableau"
+        -- "Previous tableau"
+}
+
+surface FileContextMenu {
+    -- Right-click menu on .md files.
+    facing viewer: User
+
+    provides:
+        FileOpened(file)
+
+    @guidance
+        -- "Open in Scenes" menu item on markdown files.
+}
+
+------------------------------------------------------------
+-- Design Decisions
+------------------------------------------------------------
+
+-- Heading rename detection uses a 1:1 heuristic (exactly one removed,
+-- exactly one added). Batch renames lose positions; this is acceptable
+-- because the failure mode is mild (cards reappear in the inbox).
+
+-- Cards are flat peers on the canvas despite having heading levels.
+-- Spatial arrangement is the relationship; explicit parent-child edges
+-- would fight the core design. Card.level provides visual differentiation.
+
+-- Undo/redo is out of scope for the specification. The sidecar file is
+-- version-controlled, which handles persistence of prior states.

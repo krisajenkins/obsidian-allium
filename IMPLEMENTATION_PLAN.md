@@ -24,9 +24,13 @@ domain-model view, in the same family as `obsidian-strategy`, `obsidian-life`,
 - **★ WASM parser:** `allium-lsp` ships a wasm-bindgen build at
   `…-allium-lsp-3.5.0/lib/allium-lsp/allium_wasm{_bg.wasm,.js}` (185K wasm +
   3.4K glue). It exports a single function `parse(source: string): string`
-  returning the AST as JSON. **Verified in-process:** parses the sample with
-  0 diagnostics, 66 declarations. This is the integration backbone (see §2).
-- **Sample file:** `~/Work/Notes/space-cards.allium` (real, non-trivial).
+  returning the AST as JSON. **Verified in-process (2026-06-20):** the trimmed,
+  fs-free glue instantiates the 3.5.0 wasm and `parse()` round-trips on all
+  three examples. This is the integration backbone (see §2).
+- **Examples:** `examples/*.allium` — `dictat` (v2, 28 decls), `scenes` (v2, 57
+  decls, *2 deliberate parse errors*), `space-cards` (v3, 66 decls). Span both
+  language versions and exercise the diagnostics path; these become the step-4
+  transform fixtures.
 
 ### Allium file structure (fixed section order)
 
@@ -65,16 +69,25 @@ Rationale:
 2. No subprocess, no PATH problem, no `allium` runtime dependency, and
    **`isDesktopOnly` can stay `false`** (pure WASM runs on mobile too). This is
    strictly better than the CLI plan on every axis that bit us.
-3. Verified working: loading `allium_wasm.js` and calling
-   `parse(sourceText)` on the sample returns
-   `{ module: { span, version, declarations:[66] }, diagnostics: [] }`.
+3. **Verified in-process (2026-06-20).** A trimmed glue (`init(bytes)` +
+   `parse(source)`, no `fs`/`__dirname`/`exports`) instantiates the 3.5.0 wasm
+   and round-trips all three examples. `space-cards` → 66 decls / 0 diagnostics.
+   Crucially, the wasm's parse diagnostics are *byte-for-byte identical* to the
+   authoritative `allium check` CLI on the same files (`scenes`'s 2 errors
+   reproduce at the same lines) — the parser is faithful, so the red-squiggle
+   case is covered. The CLI additionally emits semantic diagnostics (e.g.
+   `allium.surface.unusedBinding`) that the parse-only wasm does **not** —
+   confirming the `parse`-only scope below is real.
 
 **The one wrinkle — replace the shipped loader.** The vendored `allium_wasm.js`
 glue is Node/CommonJS: it does `require('fs').readFileSync(`${__dirname}/…`)`
 and `exports.parse = …`. That won't work bundled into Obsidian (esp. mobile).
-So we keep the wasm-bindgen *marshalling* helpers (`passStringToWasm0`,
-`getStringFromWasm0`, the `parse` wrapper) but swap the bottom of the file: feed
-the wasm bytes from a **bundled source** instead of `fs`. Two ways:
+**It's smaller than feared:** only the *bottom 5 lines* are Node-specific; all
+the marshalling helpers (`passStringToWasm0`, `getStringFromWasm0`,
+`__wbg_get_imports`, the `parse` wrapper) are portable as-is, and the imports
+object is trivial (just `__wbindgen_init_externref_table`). We keep those and
+swap the bottom: feed the wasm bytes from a **bundled source** instead of `fs`.
+Two ways:
   - esbuild binary loader: `loader: { ".wasm": "binary" }` → `import wasmBytes
     from "./wasm/allium_wasm_bg.wasm"`, then
     `new WebAssembly.Instance(new WebAssembly.Module(wasmBytes), imports)`; or
@@ -185,9 +198,10 @@ Every node carries a `span: {start,end}` → byte offsets for click-to-source.
    strategy. `nix develop -c pnpm install`.
 2. **Vendor + wire the WASM.** Copy `allium_wasm_bg.wasm` (3.5.0) into
    `src/wasm/`. Write `src/wasm/allium-wasm.ts` (trimmed bindgen glue, bundled
-   bytes) exporting `parse`. Smoke-test from a vitest that `parse(sample)`
-   yields 66 declarations / 0 diagnostics — *prove the wasm round-trips before
-   any UI*. (Already confirmed at the CLI; this re-confirms it inside the bundle.)
+   bytes) exporting `parse`. Smoke-test from a vitest over `examples/*.allium`:
+   `space-cards` → 66 decls / 0 diags, `scenes` → 2 diags at lines 443/459.
+   **Round-trip already proven in-process (2026-06-20) with the fs-free glue;**
+   this step just lands it in the repo build and locks it with a regression test.
 3. **Empty plugin.** `manifest.json` (`isDesktopOnly: false`), `main.ts`
    registering the `allium` extension + a stub view. Build, sideload into a test
    vault, confirm `.allium` files open the custom view (blank).
@@ -230,9 +244,10 @@ the `fileVersion` reactivity, CLAUDE.md/README structure.
 ## 6. Risks / things to verify early
 
 - **Bundling the wasm:** confirm esbuild's `binary` loader yields a `Uint8Array`
-  that `new WebAssembly.Module()` accepts, and that the trimmed glue drops *all*
-  `fs`/`__dirname` use (otherwise mobile breaks). Proven out in step 2 before
-  any UI work.
+  that `new WebAssembly.Module()` accepts. *The glue's fs/`__dirname`-free shape
+  is already proven (2026-06-20) — `new WebAssembly.Module(readFileSync(...))`
+  works in-process; the only remaining unknown is the esbuild `binary`-loader
+  hand-off, validated when step 2 lands in the build.*
 - **wasm-bindgen ABI:** the glue's pointer marshalling
   (`passStringToWasm0`/`getStringFromWasm0`/`__wbindgen_*`) must match the
   vendored `.wasm` exactly — always regenerate glue and wasm *together* from the
