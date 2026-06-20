@@ -14,11 +14,9 @@
   interface Props {
     source: string;
     fileVersion?: number;
-    /** Reveal a byte offset in the editor (wired by the view). */
-    onReveal?: (offset: number) => void;
   }
 
-  let { source, fileVersion = 0, onReveal }: Props = $props();
+  let { source, fileVersion = 0 }: Props = $props();
 
   // Re-parse + rebuild the graph whenever the file content changes.
   let graph = $derived.by<AlliumGraph & { error?: string }>(() => {
@@ -94,6 +92,30 @@
   /** A snippet of raw spec text for a span, collapsed to one tidy line. */
   function snippet(start: number, end: number): string {
     return source.slice(start, end).replace(/\s+/g, " ").trim();
+  }
+
+  /** 1-based line:col for a byte offset — the coordinate to jump to in an editor. */
+  function lineCol(offset: number): { line: number; col: number } {
+    const before = source.slice(0, offset);
+    const nl = before.lastIndexOf("\n");
+    return { line: before.split("\n").length, col: offset - nl };
+  }
+
+  /** Summon the smallest declaration whose span encloses an offset (used to
+   *  jump from a diagnostic to the construct it sits in). */
+  function revealOffset(offset: number): void {
+    let best: AlliumNode | null = null;
+    for (const n of graph.nodes) {
+      if (n.span.start <= offset && offset < n.span.end) {
+        if (!best || n.span.end - n.span.start < best.span.end - best.span.start) {
+          best = n;
+        }
+      }
+    }
+    if (best) {
+      infoKind = null;
+      summonedId = best.id;
+    }
   }
 
   /** Detail lines for the summoned card: one raw-text line per block item. */
@@ -175,9 +197,32 @@
       {/each}
     </div>
 
-    <!-- Stage -->
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-    <div class="allium-stage" onclick={dismiss}>
+    <!-- Stage + diagnostics banner -->
+    <div class="allium-main">
+      {#if graph.diagnostics.length > 0}
+        <div class="allium-diags">
+          <div class="allium-diags-head">
+            {graph.diagnostics.length} diagnostic{graph.diagnostics.length === 1 ? "" : "s"}
+          </div>
+          {#each graph.diagnostics as d (d.span.start + d.message)}
+            {@const loc = lineCol(d.span.start)}
+            <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+            <div
+              class="allium-diag"
+              class:error={d.severity === "Error"}
+              title="Jump to the enclosing declaration"
+              onclick={() => revealOffset(d.span.start)}
+            >
+              <span class="allium-diag-loc">{loc.line}:{loc.col}</span>
+              <span class="allium-diag-sev">{d.severity}</span>
+              <span class="allium-diag-msg">{d.message}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+      <div class="allium-stage" onclick={dismiss}>
       {#if summonedNode}
         {@const face = faceOf(summonedNode.kind)}
         <div
@@ -193,14 +238,7 @@
           <div class="allium-center" style="background: {face.bg}; color: {face.fg};">
             <div class="allium-center-head">
               <span class="allium-center-kind">{face.label}</span>
-              {#if onReveal}
-                <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                <span
-                  class="allium-reveal"
-                  title="Reveal in editor"
-                  onclick={(e) => { e.stopPropagation(); onReveal?.(summonedNode.span.start); }}
-                >↗ reveal</span>
-              {/if}
+              <span class="allium-center-loc" title="Line in source">line {lineCol(summonedNode.span.start).line}</span>
             </div>
             <div class="allium-center-name">{formatName(summonedNode.name)}</div>
             {#if summonedNode.kind === "OpenQuestion"}
@@ -237,6 +275,7 @@
           <div class="allium-empty-hint">click a declaration to summon it</div>
         </div>
       {/if}
+      </div>
     </div>
   {/if}
 </div>
@@ -298,6 +337,64 @@
     cursor: pointer;
     border-right: 3px solid transparent;
   }
+  .allium-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .allium-diags {
+    flex-shrink: 0;
+    max-height: 30%;
+    overflow-y: auto;
+    border-bottom: 1px solid #e0ddd8;
+    background: #faf6f2;
+  }
+  .allium-diags-head {
+    font-size: 0.62em;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 800;
+    padding: 5px 12px;
+    color: #8a5a2a;
+    background: #f2e4d6;
+  }
+  .allium-diag {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 12px;
+    font-size: 0.74em;
+    line-height: 1.35;
+    cursor: pointer;
+    border-left: 3px solid #d9a441;
+  }
+  .allium-diag.error {
+    border-left-color: #c2452f;
+  }
+  .allium-diag:hover {
+    background: #f0e8e0;
+  }
+  .allium-diag-loc {
+    flex-shrink: 0;
+    font-family: var(--font-monospace, monospace);
+    opacity: 0.6;
+    min-width: 44px;
+  }
+  .allium-diag-sev {
+    flex-shrink: 0;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.85em;
+    letter-spacing: 0.04em;
+  }
+  .allium-diag.error .allium-diag-sev {
+    color: #c2452f;
+  }
+  .allium-diag-msg {
+    opacity: 0.85;
+    overflow-wrap: anywhere;
+  }
   .allium-stage {
     flex: 1;
     position: relative;
@@ -334,13 +431,10 @@
     letter-spacing: 0.1em;
     opacity: 0.55;
   }
-  .allium-reveal {
+  .allium-center-loc {
     font-size: 0.62em;
-    opacity: 0.6;
-    cursor: pointer;
-  }
-  .allium-reveal:hover {
-    opacity: 1;
+    opacity: 0.5;
+    font-family: var(--font-monospace, monospace);
   }
   .allium-center-name {
     font-size: 1.15em;
