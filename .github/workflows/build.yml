@@ -1,0 +1,37 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build against the project's own flake (nodejs_22, pnpm, esbuild), so CI
+      # matches the local dev shell exactly. The parser wasm is vendored in the
+      # repo, so no allium-lsp is needed here.
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Install dependencies
+        run: nix develop -c pnpm install --frozen-lockfile
+
+      - name: Test
+        run: nix develop -c pnpm test
+
+      - name: Build
+        run: nix develop -c pnpm build
+
+      - name: Check build outputs exist
+        run: test -f main.js && test -f styles.css
