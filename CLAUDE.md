@@ -10,7 +10,7 @@ All commands run through Nix:
 
 ```sh
 nix develop -c pnpm install   # install deps
-nix develop -c pnpm run build # produces main.js + main.css
+nix develop -c pnpm run build # produces main.js (component CSS injected, no sidecar)
 nix develop -c pnpm run test  # parser + transform tests (vitest)
 nix develop -c pnpm run dev   # watch mode
 ```

@@ -34,6 +34,11 @@ const context = await esbuild.context({
   plugins: [
     esbuildSvelte({
       compilerOptions: {
+        // Inject component CSS into the JS bundle (a runtime <style> on mount)
+        // rather than emitting a sidecar main.css. Obsidian only auto-loads a
+        // file named styles.css, so an external main.css would never load and
+        // our scoped layout styles would silently vanish.
+        css: "injected",
         warningFilter: (warning) => {
           if (warning.code === "state_referenced_locally") return false;
           if (warning.code === "a11y_click_events_have_key_events") return false;

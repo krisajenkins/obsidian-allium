@@ -64,7 +64,7 @@ Requires Node.js 22 and pnpm (provided by the Nix flake).
 ```bash
 nix develop -c pnpm install
 nix develop -c pnpm run dev    # watch mode
-nix develop -c pnpm run build  # production build → main.js + main.css
+nix develop -c pnpm run build  # production build → main.js (CSS injected)
 nix develop -c pnpm run test   # parser + transform tests (vitest)
 ```
 
