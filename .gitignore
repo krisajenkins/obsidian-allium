@@ -1,2 +1,6 @@
 /.direnv/
 /.envrc
+/result
+/main.js
+/main.css
+/node_modules/

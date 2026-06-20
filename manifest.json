@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-allium",
+  "name": "Allium Spec",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Render .allium spec files as an interactive domain model.",
+  "author": "Kris Jenkins",
+  "isDesktopOnly": false
+}

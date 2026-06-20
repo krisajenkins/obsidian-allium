@@ -1,0 +1,23 @@
+{
+  "name": "obsidian-allium",
+  "version": "0.1.0",
+  "description": "Obsidian plugin: render .allium spec files as an interactive domain model",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@fast-check/vitest": "^0.2.4",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.21.0",
+    "esbuild-svelte": "^0.9.0",
+    "fast-check": "^4.5.3",
+    "obsidian": "^1.7.2",
+    "svelte": "^5.0.0",
+    "tslib": "^2.6.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.0.18"
+  }
+}
