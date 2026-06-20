@@ -1,8 +1,22 @@
 import esbuild from "esbuild";
 import esbuildSvelte from "esbuild-svelte";
+import { renameSync, existsSync } from "fs";
 import process from "process";
 
 const prod = process.argv[2] === "production";
+
+// Obsidian auto-loads `<plugin>/styles.css`. esbuild names the emitted CSS after
+// the JS outfile (main.css), so rename it after every build. External CSS keeps
+// Svelte's scope hashes in a real stylesheet — far more reliable than the
+// `injected` runtime <style>, which mis-applied scoped rules across hot-reloads.
+const renameCssPlugin = {
+  name: "rename-css-to-styles",
+  setup(build) {
+    build.onEnd(() => {
+      if (existsSync("main.css")) renameSync("main.css", "styles.css");
+    });
+  },
+};
 
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
@@ -34,11 +48,8 @@ const context = await esbuild.context({
   plugins: [
     esbuildSvelte({
       compilerOptions: {
-        // Inject component CSS into the JS bundle (a runtime <style> on mount)
-        // rather than emitting a sidecar main.css. Obsidian only auto-loads a
-        // file named styles.css, so an external main.css would never load and
-        // our scoped layout styles would silently vanish.
-        css: "injected",
+        // External CSS (the default): esbuild bundles it to main.css, which the
+        // plugin below renames to styles.css for Obsidian to load.
         warningFilter: (warning) => {
           if (warning.code === "state_referenced_locally") return false;
           if (warning.code === "a11y_click_events_have_key_events") return false;
@@ -46,6 +57,7 @@ const context = await esbuild.context({
         },
       },
     }),
+    renameCssPlugin,
   ],
 });
 
