@@ -36,15 +36,15 @@ export function faceOf(kind: string): {
 /** Shelf sections: ordered groups of kinds. Each becomes a labelled band in
  *  the shelf; kinds within a section keep this order. */
 export const SECTIONS: { label: string; kinds: NodeKind[] }[] = [
+  { label: "Questions", kinds: ["OpenQuestion"] },
+  { label: "Behaviour", kinds: ["Rule", "Trigger"] },
   {
     label: "Types",
     kinds: ["Entity", "Value", "ExternalEntity", "Enum", "Variant"],
   },
-  { label: "Behaviour", kinds: ["Rule", "Trigger"] },
   { label: "Boundaries", kinds: ["Surface", "Actor", "Contract"] },
   { label: "Config", kinds: ["Config"] },
   { label: "Constraints", kinds: ["Invariant"] },
-  { label: "Questions", kinds: ["OpenQuestion"] },
 ];
 
 /** Section header colours, keyed by section label. */
